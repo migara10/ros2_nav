@@ -1,0 +1,34 @@
+cd ~/ros2_nav
+colcon build --symlink-install
+source install/setup.bash
+ls install/lidar_robot/share/lidar_robot/maps/
+
+
+cd ~/ros2_nav
+colcon build --symlink-install
+source install/setup.bash
+
+
+
+source ~/ros2_nav/install/setup.bash
+ros2 launch lidar_robot bringup.launch.py
+
+source ~/ros2_nav/install/setup.bash
+ros2 launch lidar_robot navigation.launch.py
+
+
+source ~/ros2_nav/install/setup.bash
+ros2 launch lidar_robot slam.launch.py
+
+
+source /opt/ros/jazzy/setup.bash
+ros2 run teleop_twist_keyboard teleop_twist_keyboard
+
+python3 ~/ros2_nav/src/lidar_robot/odom_check.py
+
+
+
+source ~/ros2_nav/install/setup.bash
+ros2 run nav2_map_server map_saver_cli -f ~/ros2_nav/src/lidar_robot/maps/my_map_v2
+
+ls -l ~/ros2_nav/src/lidar_robot/maps/
