@@ -38,7 +38,7 @@ def generate_launch_description():
             parameters=[{
                 'port': LaunchConfiguration('arduino_port'),
                 'min_pwm': 130,
-                'wheel_sep': 0.175,
+                'wheel_sep': 0.115,
                 'wheel_radius': 0.03,
                 'ticks_per_rev': 1403.0,
                 'left_gain': 1.10,
