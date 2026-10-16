@@ -38,3 +38,8 @@ source ~/ros2_nav/install/setup.bash
 ros2 run nav2_map_server map_saver_cli -f ~/ros2_nav/src/lidar_robot/maps/my_map_v2
 
 ls -l ~/ros2_nav/src/lidar_robot/maps/
+
+
+
+ls -l /dev/ttyUSB* /dev/ttyACM*
+sudo chmod 666 /dev/ttyUSB0
