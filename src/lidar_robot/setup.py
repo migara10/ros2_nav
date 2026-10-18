@@ -32,6 +32,8 @@ setup(
     entry_points={
         'console_scripts': [
             'arduino_bridge = lidar_robot.arduino_bridge:main',
+            'frontier_explorer = lidar_robot.frontier_explorer:main',
+            'places = lidar_robot.place_manager:main',
         ],
     },
 )

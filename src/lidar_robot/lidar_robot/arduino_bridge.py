@@ -6,7 +6,7 @@ import serial
 from geometry_msgs.msg import Twist, TransformStamped
 from nav_msgs.msg import Odometry
 from rclpy.node import Node
-from sensor_msgs.msg import JointState
+from sensor_msgs.msg import JointState, Range
 from tf2_ros import TransformBroadcaster
 
 
@@ -18,11 +18,17 @@ class ArduinoBridge(Node):
         self.declare_parameter('baud', 115200)
         self.declare_parameter('ticks_per_rev', 1403.0)
         self.declare_parameter('wheel_radius', 0.03)
-        self.declare_parameter('wheel_sep', 0.175)
+        self.declare_parameter('wheel_sep', 0.115)
         self.declare_parameter('max_wheel_speed', 0.25)
         self.declare_parameter('min_pwm', 130)
-        self.declare_parameter('left_gain', 1.0)
+        self.declare_parameter('left_gain', 1.10)
         self.declare_parameter('cmd_timeout', 0.5)
+        self.declare_parameter('sonar_frame', 'sonar_link')
+        self.declare_parameter('sonar_min_range', 0.02)
+        self.declare_parameter('sonar_max_range', 2.0)
+        self.declare_parameter('sonar_stop_enabled', True)
+        self.declare_parameter('sonar_stop_distance', 0.15)
+        self.declare_parameter('sonar_resume_margin', 0.03)
 
         self.ticks_per_rev = self.get_parameter('ticks_per_rev').value
         self.wheel_radius = self.get_parameter('wheel_radius').value
@@ -31,6 +37,12 @@ class ArduinoBridge(Node):
         self.min_pwm = self.get_parameter('min_pwm').value
         self.left_gain = self.get_parameter('left_gain').value
         self.cmd_timeout = self.get_parameter('cmd_timeout').value
+        self.sonar_frame = self.get_parameter('sonar_frame').value
+        self.sonar_min = self.get_parameter('sonar_min_range').value
+        self.sonar_max = self.get_parameter('sonar_max_range').value
+        self.sonar_stop_enabled = self.get_parameter('sonar_stop_enabled').value
+        self.sonar_stop_distance = self.get_parameter('sonar_stop_distance').value
+        self.sonar_resume_margin = self.get_parameter('sonar_resume_margin').value
 
         port = self.get_parameter('port').value
         baud = self.get_parameter('baud').value
@@ -52,8 +64,13 @@ class ArduinoBridge(Node):
         self.left_pos = 0.0
         self.right_pos = 0.0
 
+        self.sonar_history = []
+        self.sonar_blocked = False
+        self.sonar_time = None
+
         self.odom_pub = self.create_publisher(Odometry, 'odom', 10)
         self.joint_pub = self.create_publisher(JointState, 'joint_states', 10)
+        self.sonar_pub = self.create_publisher(Range, 'ultrasonic', 10)
         self.tf_broadcaster = TransformBroadcaster(self)
         self.create_subscription(Twist, 'cmd_vel', self.cmd_vel_cb, 10)
 
@@ -75,12 +92,23 @@ class ArduinoBridge(Node):
         pwm = int(self.min_pwm + (255 - self.min_pwm) * ratio)
         return pwm if v > 0 else -pwm
 
+    def sonar_is_fresh(self):
+        if self.sonar_time is None:
+            return False
+        age = (self.get_clock().now() - self.sonar_time).nanoseconds / 1e9
+        return age < 0.5
+
     def send_command(self):
         age = (self.get_clock().now() - self.last_cmd_time).nanoseconds / 1e9
         if age > self.cmd_timeout:
             v, w = 0.0, 0.0
         else:
             v, w = self.cmd_v, self.cmd_w
+
+        # forward motion is blocked when the sonar sees a close obstacle;
+        # reverse and rotation are still allowed so the robot can back away
+        if self.sonar_stop_enabled and self.sonar_blocked and self.sonar_is_fresh() and v > 0.0:
+            v = 0.0
 
         v_left = v - w * self.wheel_sep / 2.0
         v_right = v + w * self.wheel_sep / 2.0
@@ -100,17 +128,62 @@ class ArduinoBridge(Node):
         while '\n' in self.rx_buffer:
             line, self.rx_buffer = self.rx_buffer.split('\n', 1)
             line = line.strip()
-            if not line.startswith('E'):
-                continue
-            parts = line[1:].split()
-            if len(parts) != 2:
-                continue
-            try:
-                left = int(parts[0])
-                right = int(parts[1])
-            except ValueError:
-                continue
-            self.update_odometry(left, right)
+            if line.startswith('E'):
+                self.handle_encoders(line)
+            elif line.startswith('U'):
+                self.handle_sonar(line)
+
+    def handle_encoders(self, line):
+        parts = line[1:].split()
+        if len(parts) != 2:
+            return
+        try:
+            left = int(parts[0])
+            right = int(parts[1])
+        except ValueError:
+            return
+        self.update_odometry(left, right)
+
+    def handle_sonar(self, line):
+        try:
+            cm = float(line[1:])
+        except ValueError:
+            return
+
+        # no echo means nothing within range
+        if cm < 0:
+            value = float('inf')
+        else:
+            value = cm / 100.0
+
+        # median of the last 3 readings removes single bad values
+        self.sonar_history.append(value)
+        self.sonar_history = self.sonar_history[-3:]
+        ordered = sorted(self.sonar_history)
+        median = ordered[len(ordered) // 2]
+        self.sonar_time = self.get_clock().now()
+
+        if median < self.sonar_stop_distance:
+            if not self.sonar_blocked:
+                self.get_logger().warn(f'Sonar stop: obstacle at {median:.2f} m')
+            self.sonar_blocked = True
+        elif median > self.sonar_stop_distance + self.sonar_resume_margin:
+            if self.sonar_blocked:
+                self.get_logger().info('Sonar clear')
+            self.sonar_blocked = False
+
+        msg = Range()
+        msg.header.stamp = self.sonar_time.to_msg()
+        msg.header.frame_id = self.sonar_frame
+        msg.radiation_type = Range.ULTRASOUND
+        msg.field_of_view = 0.26  # about 15 degrees
+        msg.min_range = float(self.sonar_min)
+        msg.max_range = float(self.sonar_max)
+        if median < self.sonar_min:
+            msg.range = float('inf')
+        else:
+            msg.range = float(median)
+        self.sonar_pub.publish(msg)
 
     def update_odometry(self, left, right):
         now = self.get_clock().now()
