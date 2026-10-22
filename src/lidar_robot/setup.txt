@@ -1,4 +1,5 @@
 cd ~/ros2_nav
+rm -rf build/lidar_robot install/lidar_robot
 colcon build --symlink-install
 source install/setup.bash
 ls install/lidar_robot/share/lidar_robot/maps/
@@ -17,7 +18,7 @@ source ~/ros2_nav/install/setup.bash
 ros2 launch lidar_robot navigation.launch.py
 
 source ~/ros2_nav/install/setup.bash
-ros2 launch lidar_robot navigation.launch.py map:=/home/migara/ros2_nav/install/lidar_robot/share/lidar_robot/maps/my_map_v2.yaml
+ros2 launch lidar_robot navigation.launch.py map:=/home/migara/ros2_nav/install/lidar_robot/share/lidar_robot/maps/my_map_v3.yaml
 
 
 source ~/ros2_nav/install/setup.bash
