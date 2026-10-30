@@ -4,7 +4,7 @@ import rclpy
 from rclpy.node import Node
 from sensor_msgs.msg import JointState
 
-WHEEL_RADIUS = 0.03  # must match the bridge wheel_radius
+WHEEL_RADIUS = 0.0335  # must match the bridge wheel_radius
 
 
 class TurnCalib(Node):

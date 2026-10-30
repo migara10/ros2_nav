@@ -6,9 +6,9 @@ from rclpy.node import Node
 from sensor_msgs.msg import JointState
 
 # these three must match the values currently used by the bridge
-WHEEL_RADIUS = 0.03
-CURRENT_TPR = 1403.0
-CURRENT_GAIN = 1.10
+WHEEL_RADIUS = 0.0335
+CURRENT_TPR = 1473.0
+CURRENT_GAIN = 1.25
 
 
 class CalibCheck(Node):

@@ -3,7 +3,7 @@
 
   <!-- measured values -->
   <xacro:property name="wheel_sep" value="0.175"/>
-  <xacro:property name="wheel_radius" value="0.03"/>
+  <xacro:property name="wheel_radius" value="0.0335"/>
   <xacro:property name="lidar_x" value="-0.08"/>
   <xacro:property name="lidar_y" value="0.0"/>
   <xacro:property name="lidar_height_above_ground" value="0.22"/>
@@ -190,6 +190,19 @@
     <parent link="base_link"/>
     <child link="lidar_link"/>
     <origin xyz="${lidar_x} ${lidar_y} ${lidar_height_above_ground - wheel_radius}" rpy="0 0 ${pi}"/>
+  </joint>
+
+  <link name="imu_link">
+    <visual>
+      <geometry><box size="0.026 0.018 0.004"/></geometry>
+      <material name="red"/>
+    </visual>
+  </link>
+
+  <joint name="imu_joint" type="fixed">
+    <parent link="base_link"/>
+    <child link="imu_link"/>
+    <origin xyz="-0.05 0 0.0165" rpy="0 0 ${-pi/2}"/>
   </joint>
 
 </robot>

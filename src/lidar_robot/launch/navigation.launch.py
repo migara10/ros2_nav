@@ -10,7 +10,7 @@ def generate_launch_description():
     pkg = get_package_share_directory('lidar_robot')
     nav2_pkg = get_package_share_directory('nav2_bringup')
 
-    default_map = os.path.join(pkg, 'maps', 'my_map_v3.yaml')
+    default_map = os.path.join(pkg, 'maps', 'my_map_v4.yaml')
     params = os.path.join(pkg, 'config', 'nav2_params.yaml')
 
     return LaunchDescription([

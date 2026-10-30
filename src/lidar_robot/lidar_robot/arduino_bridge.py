@@ -17,12 +17,13 @@ class ArduinoBridge(Node):
         self.declare_parameter('port', '/dev/serial/by-id/usb-1a86_USB_Serial-if00-port0')
         self.declare_parameter('baud', 115200)
         self.declare_parameter('ticks_per_rev', 1403.0)
-        self.declare_parameter('wheel_radius', 0.03)
+        self.declare_parameter('wheel_radius', 0.0335)
         self.declare_parameter('wheel_sep', 0.175)
         self.declare_parameter('max_wheel_speed', 0.25)
         self.declare_parameter('min_pwm', 130)
         self.declare_parameter('left_gain', 1.0)
         self.declare_parameter('cmd_timeout', 0.5)
+        self.declare_parameter('publish_tf', True)
 
         self.ticks_per_rev = self.get_parameter('ticks_per_rev').value
         self.wheel_radius = self.get_parameter('wheel_radius').value
@@ -31,6 +32,7 @@ class ArduinoBridge(Node):
         self.min_pwm = self.get_parameter('min_pwm').value
         self.left_gain = self.get_parameter('left_gain').value
         self.cmd_timeout = self.get_parameter('cmd_timeout').value
+        self.publish_tf = self.get_parameter('publish_tf').value
 
         port = self.get_parameter('port').value
         baud = self.get_parameter('baud').value
@@ -161,7 +163,8 @@ class ArduinoBridge(Node):
         tf.transform.translation.y = self.y
         tf.transform.rotation.z = qz
         tf.transform.rotation.w = qw
-        self.tf_broadcaster.sendTransform(tf)
+        if self.publish_tf:
+            self.tf_broadcaster.sendTransform(tf)
 
         js = JointState()
         js.header.stamp = stamp
