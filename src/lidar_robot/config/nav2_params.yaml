@@ -72,7 +72,7 @@ controller_server:
     min_x_velocity_threshold: 0.001
     min_y_velocity_threshold: 0.5
     min_theta_velocity_threshold: 0.001
-    failure_tolerance: 0.3
+    failure_tolerance: 1.0
     progress_checker_plugins: ["progress_checker"]
     goal_checker_plugins: ["general_goal_checker"]
     controller_plugins: ["FollowPath"]
@@ -81,13 +81,13 @@ controller_server:
     progress_checker:
       plugin: "nav2_controller::SimpleProgressChecker"
       required_movement_radius: 0.15
-      movement_time_allowance: 8.0
+      movement_time_allowance: 20.0
 
     general_goal_checker:
       stateful: True
       plugin: "nav2_controller::SimpleGoalChecker"
       xy_goal_tolerance: 0.20
-      yaw_goal_tolerance: 1.0
+      yaw_goal_tolerance: 0.5
 
     FollowPath:
       plugin: "dwb_core::DWBLocalPlanner"
@@ -108,7 +108,7 @@ controller_server:
       decel_lim_theta: -1.5
       vx_samples: 10
       vy_samples: 1
-      vtheta_samples: 15
+      vtheta_samples: 11
       sim_time: 1.5
       linear_granularity: 0.05
       angular_granularity: 0.025
@@ -141,7 +141,7 @@ local_costmap:
       width: 3
       height: 3
       resolution: 0.05
-      footprint: "[[0.10, 0.13], [0.10, -0.13], [-0.20, -0.13], [-0.20, 0.13]]"
+      robot_radius: 0.22
       plugins: ["obstacle_layer", "inflation_layer"]
       obstacle_layer:
         plugin: "nav2_costmap_2d::ObstacleLayer"
@@ -160,7 +160,7 @@ local_costmap:
       inflation_layer:
         plugin: "nav2_costmap_2d::InflationLayer"
         cost_scaling_factor: 3.0
-        inflation_radius: 0.40
+        inflation_radius: 0.38
       always_send_full_costmap: True
 
 global_costmap:
@@ -173,7 +173,7 @@ global_costmap:
       use_sim_time: false
       resolution: 0.05
       track_unknown_space: true
-      footprint: "[[0.10, 0.13], [0.10, -0.13], [-0.20, -0.13], [-0.20, 0.13]]"
+      robot_radius: 0.22
       plugins: ["static_layer", "obstacle_layer", "inflation_layer"]
       obstacle_layer:
         plugin: "nav2_costmap_2d::ObstacleLayer"
@@ -195,7 +195,7 @@ global_costmap:
       inflation_layer:
         plugin: "nav2_costmap_2d::InflationLayer"
         cost_scaling_factor: 3.0
-        inflation_radius: 0.40
+        inflation_radius: 0.38
       always_send_full_costmap: True
 
 map_server:
@@ -218,9 +218,9 @@ planner_server:
     planner_plugins: ["GridBased"]
     GridBased:
       plugin: "nav2_navfn_planner::NavfnPlanner"
-      tolerance: 0.5
+      tolerance: 0.2
       use_astar: true
-      allow_unknown: true
+      allow_unknown: false
 
 smoother_server:
   ros__parameters:
@@ -299,14 +299,14 @@ collision_monitor:
     source_timeout: 5.0
     base_shift_correction: True
     stop_pub_timeout: 2.0
-    polygons: ["FootprintApproach"]
-    FootprintApproach:
+    polygons: ["BodyApproach"]
+    BodyApproach:
       type: "polygon"
       action_type: "approach"
-      footprint_topic: "/local_costmap/published_footprint"
-      time_before_collision: 1.2
+      points: "[[0.05, 0.105], [0.05, -0.105], [-0.20, -0.105], [-0.20, 0.105]]"
+      time_before_collision: 0.5
       simulation_time_step: 0.1
-      min_points: 6
+      min_points: 4
       visualize: False
       enabled: True
     observation_sources: ["scan"]

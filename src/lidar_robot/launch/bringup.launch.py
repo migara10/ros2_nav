@@ -16,6 +16,7 @@ def generate_launch_description():
     pkg = get_package_share_directory('lidar_robot')
     xacro_file = os.path.join(pkg, 'urdf', 'lidar_robot.urdf.xacro')
     rviz_config = os.path.join(pkg, 'rviz', 'display.rviz')
+    ekf_config = os.path.join(pkg, 'config', 'ekf.yaml')
 
     robot_description = xacro.process_file(xacro_file).toxml()
     rviz_args = ['-d', rviz_config] if os.path.exists(rviz_config) else []
@@ -37,12 +38,14 @@ def generate_launch_description():
             executable='arduino_bridge',
             parameters=[{
                 'port': LaunchConfiguration('arduino_port'),
+                'publish_tf': False,
                 'min_pwm': 130,
-                'wheel_sep': 0.115,
-                'wheel_radius': 0.03,
-                'ticks_per_rev': 1403.0,
-                'left_gain': 1.10,
+                'wheel_sep': 0.175,
+                'wheel_radius': 0.0335,
+                'ticks_per_rev': 1520.0,
+                'left_gain': 1.25,
             }],
+            remappings=[('odom', 'odom_wheel')],
             output='screen',
         ),
 
@@ -57,6 +60,22 @@ def generate_launch_description():
                 'angle_compensate': True,
             }],
             output='screen',
+        ),
+
+        Node(
+            package='lidar_robot',
+            executable='imu_node',
+            name='imu_node',
+            output='screen',
+        ),
+
+        Node(
+            package='robot_localization',
+            executable='ekf_node',
+            name='ekf_filter_node',
+            output='screen',
+            parameters=[ekf_config],
+            remappings=[('odometry/filtered', 'odom')],
         ),
 
         Node(
