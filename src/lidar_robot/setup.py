@@ -33,6 +33,7 @@ setup(
         'console_scripts': [
             'arduino_bridge = lidar_robot.arduino_bridge:main',
             'scan_gate = lidar_robot.scan_gate:main',
+            'goto_pose = lidar_robot.goto_pose:main',
         ],
     },
 )

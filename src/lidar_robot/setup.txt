@@ -44,3 +44,4 @@ ls -l ~/ros2_nav/src/lidar_robot/maps/
 
 ls -l /dev/ttyUSB* /dev/ttyACM*
 sudo chmod 666 /dev/ttyUSB0
+sudo usermod -aG dialout $USER
