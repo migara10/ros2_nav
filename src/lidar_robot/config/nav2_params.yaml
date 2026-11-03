@@ -309,12 +309,16 @@ collision_monitor:
       min_points: 4
       visualize: False
       enabled: True
-    observation_sources: ["scan"]
+    observation_sources: ["scan", "sonar"]
     scan:
       type: "scan"
       topic: "scan"
       min_height: 0.15
       max_height: 2.0
+      enabled: True
+    sonar:
+      type: "range"
+      topic: "range"
       enabled: True
 
 docking_server:

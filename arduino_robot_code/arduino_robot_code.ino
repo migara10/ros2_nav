@@ -1,6 +1,7 @@
-// Differential drive controller with encoders
+// Differential drive controller with encoders and HC-SR04
 // In:  "L<speed> R<speed>\n"   speed range -255..255
 // Out: "E<left_ticks> <right_ticks>\n" every 50 ms
+//      "U<distance_mm>\n" every 100 ms (-1 means no echo)
 
 #define ENA 5
 #define IN1 6
@@ -14,6 +15,9 @@
 #define R_ENC_A 3
 #define R_ENC_B 11
 
+#define TRIG_PIN 12
+#define ECHO_PIN A0
+
 // set to -1 if the count decreases while moving forward
 const int LEFT_ENC_SIGN  = -1;
 const int RIGHT_ENC_SIGN = 1;
@@ -26,8 +30,11 @@ bool stringComplete = false;
 
 unsigned long lastCommandTime = 0;
 unsigned long lastPublishTime = 0;
+unsigned long lastRangeTime = 0;
 const unsigned long TIMEOUT_MS = 1000;
 const unsigned long PUBLISH_MS = 50;
+const unsigned long RANGE_MS = 100;
+const unsigned long ECHO_TIMEOUT_US = 8000UL;  // about 1.3 m
 
 void leftISR() {
   if (digitalRead(L_ENC_A) == digitalRead(L_ENC_B)) leftTicks--;
@@ -54,6 +61,10 @@ void setup() {
   pinMode(L_ENC_B, INPUT_PULLUP);
   pinMode(R_ENC_A, INPUT_PULLUP);
   pinMode(R_ENC_B, INPUT_PULLUP);
+
+  pinMode(TRIG_PIN, OUTPUT);
+  pinMode(ECHO_PIN, INPUT);
+  digitalWrite(TRIG_PIN, LOW);
 
   attachInterrupt(digitalPinToInterrupt(L_ENC_A), leftISR, CHANGE);
   attachInterrupt(digitalPinToInterrupt(R_ENC_A), rightISR, CHANGE);
@@ -88,6 +99,12 @@ void loop() {
     Serial.print(" ");
     Serial.println(r * RIGHT_ENC_SIGN);
   }
+
+  if (now - lastRangeTime >= RANGE_MS) {
+    lastRangeTime = now;
+    Serial.print("U");
+    Serial.println(readRangeMm());
+  }
 }
 
 void serialEvent() {
@@ -99,6 +116,18 @@ void serialEvent() {
       inputString += inChar;
     }
   }
+}
+
+long readRangeMm() {
+  digitalWrite(TRIG_PIN, LOW);
+  delayMicroseconds(2);
+  digitalWrite(TRIG_PIN, HIGH);
+  delayMicroseconds(10);
+  digitalWrite(TRIG_PIN, LOW);
+
+  unsigned long us = pulseIn(ECHO_PIN, HIGH, ECHO_TIMEOUT_US);
+  if (us == 0) return -1;
+  return (long)(us * 0.1715f);
 }
 
 void parseCommand(String cmd) {
