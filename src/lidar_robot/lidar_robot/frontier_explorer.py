@@ -1,16 +1,111 @@
 import math
+import os
+import subprocess
+import time
 from collections import deque
+from datetime import datetime
 
 import numpy as np
 import rclpy
-from geometry_msgs.msg import PoseStamped
+from action_msgs.msg import GoalStatus
+from geometry_msgs.msg import Point
 from nav2_msgs.action import NavigateToPose
 from nav_msgs.msg import OccupancyGrid
-from action_msgs.msg import GoalStatus
 from rclpy.action import ActionClient
 from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
-import tf2_ros
+from tf2_ros import Buffer, TransformListener
+from visualization_msgs.msg import Marker
+
+
+def find_frontier_clusters(data, width, height, clearance_cells, min_size):
+    """Return a list of clusters, each a list of (row, col) frontier cells.
+
+    A frontier cell is a free cell that touches an unknown cell. Cells closer
+    than clearance_cells to an occupied cell are dropped, because the robot
+    cannot stand there anyway.
+    """
+    grid = np.asarray(data, dtype=np.int16).reshape(height, width)
+    unknown = grid < 0
+    free = (grid >= 0) & (grid < 50)
+    occupied = grid >= 50
+
+    unknown_nb = np.zeros_like(unknown)
+    unknown_nb[1:, :] |= unknown[:-1, :]
+    unknown_nb[:-1, :] |= unknown[1:, :]
+    unknown_nb[:, 1:] |= unknown[:, :-1]
+    unknown_nb[:, :-1] |= unknown[:, 1:]
+    frontier = free & unknown_nb
+
+    near = occupied.copy()
+    for _ in range(clearance_cells):
+        grown = near.copy()
+        grown[1:, :] |= near[:-1, :]
+        grown[:-1, :] |= near[1:, :]
+        grown[:, 1:] |= near[:, :-1]
+        grown[:, :-1] |= near[:, 1:]
+        grown[1:, 1:] |= near[:-1, :-1]
+        grown[1:, :-1] |= near[:-1, 1:]
+        grown[:-1, 1:] |= near[1:, :-1]
+        grown[:-1, :-1] |= near[1:, 1:]
+        near = grown
+    frontier &= ~near
+
+    rows, cols = np.nonzero(frontier)
+    cells = set(zip(rows.tolist(), cols.tolist()))
+    clusters = []
+    while cells:
+        start = cells.pop()
+        members = [start]
+        queue = deque([start])
+        while queue:
+            cr, cc = queue.popleft()
+            for dr in (-1, 0, 1):
+                for dc in (-1, 0, 1):
+                    if dr == 0 and dc == 0:
+                        continue
+                    nb = (cr + dr, cc + dc)
+                    if nb in cells:
+                        cells.remove(nb)
+                        queue.append(nb)
+                        members.append(nb)
+        if len(members) >= min_size:
+            clusters.append(members)
+    return clusters
+
+
+def cell_to_world(row, col, res, ox, oy):
+    return ox + (col + 0.5) * res, oy + (row + 0.5) * res
+
+
+def choose_frontier(clusters, robot_xy, res, ox, oy, min_goal_dist,
+                    blacklist, blacklist_radius, gain_scale):
+    """Pick the best frontier goal. Returns (score, x, y, size) or None."""
+    best = None
+    for members in clusters:
+        mean_r = sum(m[0] for m in members) / len(members)
+        mean_c = sum(m[1] for m in members) / len(members)
+        # use a real frontier cell (the one nearest to the centroid) as the goal
+        mr, mc = min(members, key=lambda m: (m[0] - mean_r) ** 2 + (m[1] - mean_c) ** 2)
+        gx, gy = cell_to_world(mr, mc, res, ox, oy)
+        dist = math.hypot(gx - robot_xy[0], gy - robot_xy[1])
+        if dist < min_goal_dist:
+            continue
+        if any(math.hypot(gx - bx, gy - by) < blacklist_radius for bx, by in blacklist):
+            continue
+        score = dist - gain_scale * len(members) * res
+        if best is None or score < best[0]:
+            best = (score, gx, gy, len(members))
+    return best
+
+
+def goal_still_frontier(clusters, goal_xy, res, ox, oy, radius):
+    for members in clusters:
+        for r, c in members:
+            x, y = cell_to_world(r, c, res, ox, oy)
+            if math.hypot(x - goal_xy[0], y - goal_xy[1]) < radius:
+                return True
+    return False
 
 
 class FrontierExplorer(Node):
@@ -20,256 +115,251 @@ class FrontierExplorer(Node):
         self.declare_parameter('map_topic', 'map')
         self.declare_parameter('map_frame', 'map')
         self.declare_parameter('robot_frame', 'base_footprint')
-        self.declare_parameter('min_frontier_cells', 6)
+        self.declare_parameter('min_frontier_size', 3)
         self.declare_parameter('clearance', 0.25)
-        self.declare_parameter('min_goal_distance', 0.4)
+        self.declare_parameter('min_goal_distance', 0.35)
+        self.declare_parameter('goal_timeout', 120.0)
         self.declare_parameter('blacklist_radius', 0.4)
-        self.declare_parameter('goal_timeout', 90.0)
-        self.declare_parameter('size_weight', 0.5)
-        self.declare_parameter('max_runtime_min', 30.0)
-        self.declare_parameter('empty_checks_to_finish', 5)
+        self.declare_parameter('gain_scale', 1.0)
+        self.declare_parameter('idle_ticks_to_finish', 6)
+        self.declare_parameter('return_to_start', True)
+        self.declare_parameter('map_dir', '~/ros2_nav/src/lidar_robot/maps')
 
         self.map_frame = self.get_parameter('map_frame').value
         self.robot_frame = self.get_parameter('robot_frame').value
-        self.min_cells = self.get_parameter('min_frontier_cells').value
+        self.min_size = self.get_parameter('min_frontier_size').value
         self.clearance = self.get_parameter('clearance').value
-        self.min_goal_distance = self.get_parameter('min_goal_distance').value
-        self.blacklist_radius = self.get_parameter('blacklist_radius').value
+        self.min_goal_dist = self.get_parameter('min_goal_distance').value
         self.goal_timeout = self.get_parameter('goal_timeout').value
-        self.size_weight = self.get_parameter('size_weight').value
-        self.max_runtime = self.get_parameter('max_runtime_min').value * 60.0
-        self.empty_limit = self.get_parameter('empty_checks_to_finish').value
+        self.blacklist_radius = self.get_parameter('blacklist_radius').value
+        self.gain_scale = self.get_parameter('gain_scale').value
+        self.idle_limit = self.get_parameter('idle_ticks_to_finish').value
+        self.return_to_start = self.get_parameter('return_to_start').value
 
-        self.map_msg = None
-        self.blacklist = []
-        self.navigating = False
-        self.goal_handle = None
-        self.goal_xy = None
-        self.goal_start = None
-        self.empty_count = 0
-        self.finished = False
-        self.start_time = self.get_clock().now()
-        self.waited_for_map = False
+        self.tf_buffer = Buffer()
+        self.tf_listener = TransformListener(self.tf_buffer, self)
 
-        qos = QoSProfile(
+        map_qos = QoSProfile(
             depth=1,
-            durability=DurabilityPolicy.TRANSIENT_LOCAL,
             reliability=ReliabilityPolicy.RELIABLE,
+            durability=DurabilityPolicy.TRANSIENT_LOCAL,
         )
         self.create_subscription(
-            OccupancyGrid, self.get_parameter('map_topic').value, self.map_cb, qos
-        )
+            OccupancyGrid, self.get_parameter('map_topic').value, self.map_cb, map_qos)
+        self.marker_pub = self.create_publisher(Marker, 'explore/frontiers', 1)
+        self.nav_client = ActionClient(self, NavigateToPose, 'navigate_to_pose')
 
-        self.tf_buffer = tf2_ros.Buffer()
-        self.tf_listener = tf2_ros.TransformListener(self.tf_buffer, self)
+        self.map_msg = None
+        self.start_pose = None
+        self.phase = 'explore'  # explore -> returning -> done
+        self.goal_active = False
+        self.goal_handle = None
+        self.current_goal = None
+        self.goal_start = 0.0
+        self.last_check = 0.0
+        self.blacklist = []
+        self.blacklist_after_cancel = False
+        self.cancel_sent = False
+        self.idle_ticks = 0
 
-        self.client = ActionClient(self, NavigateToPose, 'navigate_to_pose')
         self.create_timer(1.0, self.tick)
+        self.get_logger().info('Frontier explorer started, waiting for /map and Nav2')
 
-        self.get_logger().info('Frontier explorer started, waiting for the map and Nav2')
+    # ------------------------------------------------------------ helpers
 
     def map_cb(self, msg):
         self.map_msg = msg
 
-    def get_robot_xy(self):
+    def get_robot_pose(self):
         try:
             t = self.tf_buffer.lookup_transform(
-                self.map_frame, self.robot_frame, rclpy.time.Time()
-            )
+                self.map_frame, self.robot_frame, rclpy.time.Time())
         except Exception:
             return None
-        return t.transform.translation.x, t.transform.translation.y
+        q = t.transform.rotation
+        yaw = math.atan2(2.0 * (q.w * q.z + q.x * q.y),
+                         1.0 - 2.0 * (q.y * q.y + q.z * q.z))
+        return t.transform.translation.x, t.transform.translation.y, yaw
 
-    def is_blacklisted(self, x, y):
-        for bx, by in self.blacklist:
-            if math.hypot(x - bx, y - by) < self.blacklist_radius:
-                return True
-        return False
+    def current_clusters(self):
+        m = self.map_msg
+        res = m.info.resolution
+        clearance_cells = max(1, int(round(self.clearance / res)))
+        return find_frontier_clusters(
+            m.data, m.info.width, m.info.height, clearance_cells, self.min_size)
 
-    def find_frontiers(self, msg):
-        w = msg.info.width
-        h = msg.info.height
-        data = np.array(msg.data, dtype=np.int16).reshape((h, w))
+    def publish_markers(self, clusters):
+        m = self.map_msg
+        res = m.info.resolution
+        ox = m.info.origin.position.x
+        oy = m.info.origin.position.y
 
-        unknown = data == -1
-        free = (data >= 0) & (data < 50)
-        occupied = data >= 50
+        marker = Marker()
+        marker.header.frame_id = self.map_frame
+        marker.header.stamp = self.get_clock().now().to_msg()
+        marker.ns = 'frontiers'
+        marker.id = 0
+        marker.type = Marker.POINTS
+        marker.action = Marker.ADD
+        marker.scale.x = 0.05
+        marker.scale.y = 0.05
+        marker.color.g = 1.0
+        marker.color.a = 1.0
+        for members in clusters:
+            for r, c in members:
+                x, y = cell_to_world(r, c, res, ox, oy)
+                marker.points.append(Point(x=x, y=y, z=0.05))
+        self.marker_pub.publish(marker)
 
-        # a frontier cell is a free cell that touches an unknown cell
-        pad = np.pad(unknown, 1, constant_values=False)
-        near_unknown = (
-            pad[:-2, 1:-1] | pad[2:, 1:-1] | pad[1:-1, :-2] | pad[1:-1, 2:]
-        )
-        frontier = free & near_unknown
+    # --------------------------------------------------------- navigation
 
-        visited = np.zeros_like(frontier, dtype=bool)
-        clusters = []
-        ys, xs = np.nonzero(frontier)
-        for y0, x0 in zip(ys.tolist(), xs.tolist()):
-            if visited[y0, x0]:
-                continue
-            queue = deque([(y0, x0)])
-            visited[y0, x0] = True
-            cells = []
-            while queue:
-                y, x = queue.popleft()
-                cells.append((y, x))
-                for dy in (-1, 0, 1):
-                    for dx in (-1, 0, 1):
-                        ny = y + dy
-                        nx = x + dx
-                        if (
-                            0 <= ny < h
-                            and 0 <= nx < w
-                            and frontier[ny, nx]
-                            and not visited[ny, nx]
-                        ):
-                            visited[ny, nx] = True
-                            queue.append((ny, nx))
-            if len(cells) >= self.min_cells:
-                clusters.append(cells)
-        return clusters, occupied
-
-    def has_clearance(self, occupied, y, x, radius):
-        h, w = occupied.shape
-        y0 = max(0, y - radius)
-        y1 = min(h, y + radius + 1)
-        x0 = max(0, x - radius)
-        x1 = min(w, x + radius + 1)
-        return not occupied[y0:y1, x0:x1].any()
-
-    def choose_goal(self, msg, rx, ry):
-        res = msg.info.resolution
-        ox = msg.info.origin.position.x
-        oy = msg.info.origin.position.y
-        clusters, occupied = self.find_frontiers(msg)
-        radius = int(math.ceil(self.clearance / res))
-
-        best = None
-        for cells in clusters:
-            cy = sum(c[0] for c in cells) / len(cells)
-            cx = sum(c[1] for c in cells) / len(cells)
-            ordered = sorted(cells, key=lambda c: (c[0] - cy) ** 2 + (c[1] - cx) ** 2)
-
-            goal_cell = None
-            for y, x in ordered[:40]:
-                if self.has_clearance(occupied, y, x, radius):
-                    goal_cell = (y, x)
-                    break
-            if goal_cell is None:
-                continue
-
-            gx = ox + (goal_cell[1] + 0.5) * res
-            gy = oy + (goal_cell[0] + 0.5) * res
-            dist = math.hypot(gx - rx, gy - ry)
-            if dist < self.min_goal_distance:
-                continue
-            if self.is_blacklisted(gx, gy):
-                continue
-
-            size_m = len(cells) * res
-            score = dist - self.size_weight * size_m
-            if best is None or score < best[0]:
-                best = (score, gx, gy)
-        return best, len(clusters)
-
-    def send_goal(self, gx, gy, rx, ry):
-        yaw = math.atan2(gy - ry, gx - rx)
-        pose = PoseStamped()
-        pose.header.frame_id = self.map_frame
-        pose.header.stamp = self.get_clock().now().to_msg()
-        pose.pose.position.x = gx
-        pose.pose.position.y = gy
-        pose.pose.orientation.z = math.sin(yaw / 2.0)
-        pose.pose.orientation.w = math.cos(yaw / 2.0)
-
+    def send_goal(self, gx, gy, yaw):
         goal = NavigateToPose.Goal()
-        goal.pose = pose
+        goal.pose.header.frame_id = self.map_frame
+        goal.pose.header.stamp = self.get_clock().now().to_msg()
+        goal.pose.pose.position.x = gx
+        goal.pose.pose.position.y = gy
+        goal.pose.pose.orientation.z = math.sin(yaw / 2.0)
+        goal.pose.pose.orientation.w = math.cos(yaw / 2.0)
 
-        self.goal_xy = (gx, gy)
-        self.goal_start = self.get_clock().now()
-        self.navigating = True
-        self.get_logger().info(f'Going to frontier at x={gx:.2f} y={gy:.2f}')
-        future = self.client.send_goal_async(goal)
-        future.add_done_callback(self.goal_response_cb)
+        self.goal_active = True
+        self.cancel_sent = False
+        self.current_goal = (gx, gy)
+        self.goal_start = time.monotonic()
+        self.last_check = time.monotonic()
+        self.nav_client.send_goal_async(goal).add_done_callback(self.goal_response_cb)
 
     def goal_response_cb(self, future):
         handle = future.result()
         if not handle.accepted:
-            self.get_logger().warn('Goal rejected, blacklisting this frontier')
-            self.blacklist.append(self.goal_xy)
-            self.navigating = False
+            self.get_logger().warn('Goal rejected, blacklisting it')
+            if self.current_goal is not None and self.phase == 'explore':
+                self.blacklist.append(self.current_goal)
+            self.goal_active = False
+            self.current_goal = None
             return
         self.goal_handle = handle
         handle.get_result_async().add_done_callback(self.result_cb)
 
     def result_cb(self, future):
         status = future.result().status
-        if status == GoalStatus.STATUS_SUCCEEDED:
-            self.get_logger().info('Reached frontier')
-        else:
-            self.get_logger().warn(f'Goal ended with status {status}, blacklisting it')
-            self.blacklist.append(self.goal_xy)
+        goal = self.current_goal
+        self.goal_active = False
         self.goal_handle = None
-        self.navigating = False
+        self.current_goal = None
+        self.cancel_sent = False
 
-    def cancel_goal(self):
-        if self.goal_handle is not None:
-            self.goal_handle.cancel_goal_async()
+        if self.phase == 'returning':
+            if status == GoalStatus.STATUS_SUCCEEDED:
+                self.get_logger().info('Back at the start pose. Exploration complete.')
+            else:
+                self.get_logger().warn('Could not return to the start pose.')
+            self.phase = 'done'
+            return
 
-    def finish(self, text):
-        self.finished = True
-        self.cancel_goal()
-        self.get_logger().info(text)
+        if status == GoalStatus.STATUS_SUCCEEDED:
+            self.get_logger().info('Reached the frontier goal')
+        elif status == GoalStatus.STATUS_CANCELED:
+            if self.blacklist_after_cancel and goal is not None:
+                self.blacklist.append(goal)
+        elif goal is not None:
+            self.get_logger().warn('Goal failed, blacklisting it')
+            self.blacklist.append(goal)
+        self.blacklist_after_cancel = False
+
+    def cancel_goal(self, blacklist):
+        if self.goal_handle is None or self.cancel_sent:
+            return
+        self.cancel_sent = True
+        self.blacklist_after_cancel = blacklist
+        self.goal_handle.cancel_goal_async()
+
+    # ------------------------------------------------------------ main loop
 
     def tick(self):
-        if self.finished:
+        if self.phase == 'done':
             return
-
-        elapsed = (self.get_clock().now() - self.start_time).nanoseconds / 1e9
-        if elapsed > self.max_runtime:
-            self.finish('Maximum run time reached, stopping exploration')
-            return
-
-        if self.navigating:
-            goal_age = (self.get_clock().now() - self.goal_start).nanoseconds / 1e9
-            if goal_age > self.goal_timeout:
-                self.get_logger().warn('Goal timed out, cancelling and blacklisting it')
-                self.blacklist.append(self.goal_xy)
-                self.cancel_goal()
-                self.navigating = False
-            return
-
         if self.map_msg is None:
-            if not self.waited_for_map:
-                self.get_logger().info('Waiting for /map')
-                self.waited_for_map = True
             return
-
-        if not self.client.wait_for_server(timeout_sec=0.5):
-            self.get_logger().info('Waiting for the Nav2 navigate_to_pose server')
+        if not self.nav_client.server_is_ready():
+            self.nav_client.wait_for_server(timeout_sec=0.0)
             return
-
-        pose = self.get_robot_xy()
+        pose = self.get_robot_pose()
         if pose is None:
-            self.get_logger().info('Waiting for the map to base_footprint transform')
             return
-        rx, ry = pose
-
-        best, count = self.choose_goal(self.map_msg, rx, ry)
-        if best is None:
-            self.empty_count += 1
+        if self.start_pose is None:
+            self.start_pose = pose
             self.get_logger().info(
-                f'No reachable frontier ({count} frontier groups seen), '
-                f'check {self.empty_count}/{self.empty_limit}'
-            )
-            if self.empty_count >= self.empty_limit:
-                self.finish('Exploration complete. Save the map now.')
+                'Start pose (%.2f, %.2f), exploring' % (pose[0], pose[1]))
+
+        if self.phase == 'returning':
             return
 
-        self.empty_count = 0
-        _, gx, gy = best
-        self.send_goal(gx, gy, rx, ry)
+        clusters = self.current_clusters()
+        self.publish_markers(clusters)
+
+        res = self.map_msg.info.resolution
+        ox = self.map_msg.info.origin.position.x
+        oy = self.map_msg.info.origin.position.y
+
+        if self.goal_active:
+            now = time.monotonic()
+            if self.goal_handle is not None and now - self.goal_start > self.goal_timeout:
+                self.get_logger().warn('Goal timeout, giving up on it')
+                self.cancel_goal(True)
+            elif (self.goal_handle is not None and self.current_goal is not None
+                  and now - self.last_check > 3.0):
+                self.last_check = now
+                if not goal_still_frontier(
+                        clusters, self.current_goal, res, ox, oy, 0.5):
+                    self.get_logger().info('Frontier already explored, picking a new one')
+                    self.cancel_goal(False)
+            return
+
+        target = choose_frontier(
+            clusters, pose[:2], res, ox, oy, self.min_goal_dist,
+            self.blacklist, self.blacklist_radius, self.gain_scale)
+
+        if target is None:
+            self.idle_ticks += 1
+            if self.idle_ticks >= self.idle_limit:
+                self.finish(pose)
+            return
+
+        self.idle_ticks = 0
+        _, gx, gy, size = target
+        yaw = math.atan2(gy - pose[1], gx - pose[0])
+        self.get_logger().info(
+            'Going to frontier (%.2f, %.2f), %d cells' % (gx, gy, size))
+        self.send_goal(gx, gy, yaw)
+
+    def finish(self, pose):
+        self.get_logger().info('No reachable frontiers left, saving the map')
+        self.save_map()
+        if self.return_to_start and self.start_pose is not None:
+            self.phase = 'returning'
+            self.get_logger().info('Returning to the start pose')
+            self.send_goal(self.start_pose[0], self.start_pose[1], self.start_pose[2])
+        else:
+            self.phase = 'done'
+            self.get_logger().info('Exploration complete.')
+
+    def save_map(self):
+        directory = os.path.expanduser(self.get_parameter('map_dir').value)
+        os.makedirs(directory, exist_ok=True)
+        name = datetime.now().strftime('auto_map_%Y%m%d_%H%M%S')
+        path = os.path.join(directory, name)
+        try:
+            subprocess.run(
+                ['ros2', 'run', 'nav2_map_server', 'map_saver_cli', '-f', path],
+                timeout=60, check=False)
+        except Exception as exc:
+            self.get_logger().error('Map saver failed: %s' % exc)
+            return
+        if os.path.exists(path + '.yaml'):
+            self.get_logger().info('Map saved as %s.yaml' % path)
+        else:
+            self.get_logger().error('Map file was not created, save it manually')
 
 
 def main(args=None):
@@ -279,9 +369,9 @@ def main(args=None):
         rclpy.spin(node)
     except KeyboardInterrupt:
         pass
-    node.cancel_goal()
     node.destroy_node()
-    rclpy.shutdown()
+    if rclpy.ok():
+        rclpy.shutdown()
 
 
 if __name__ == '__main__':
